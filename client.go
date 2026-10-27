@@ -21,10 +21,20 @@ const neteaseBaseURL = "https://open.yunxinapi.com/im/v2"
 // defaultTimeout 默认 HTTP 请求超时时间，可通过 WithHttpClient 覆盖
 const defaultTimeout = 30 * time.Second
 
-// Log 日志抽象接口，与标准库 log/slog.Logger 的 Debug 签名一致，
-// 因此 *slog.Logger 原生满足该接口，也可替换为自定义实现。
+// Log 日志抽象接口。注意：*slog.Logger 本身的 Debug 方法不接收 context，
+// 需通过 slogLog 适配器将其 DebugContext 适配为 Log.Debug 签名。
 type Log interface {
-	Debug(msg string, args ...any)
+	Debug(ctx context.Context, msg string, args ...any)
+}
+
+// slogLog 将 *slog.Logger 适配为 Log 接口：
+// Log.Debug(ctx, msg, args...)  ->  slog.Logger.DebugContext(ctx, msg, args...)
+type slogLog struct {
+	*slog.Logger
+}
+
+func (s slogLog) Debug(ctx context.Context, msg string, args ...any) {
+	s.Logger.DebugContext(ctx, msg, args...)
 }
 
 type ResponseBase struct {
@@ -108,10 +118,10 @@ func CreateImClient(appKey, appSecret string, opts ...Option) *ImClient {
 	}
 
 	if c.log == nil {
-		c.log = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		c.log = slogLog{slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 			AddSource: true,            // 记录日志位置
 			Level:     slog.LevelDebug, // 设置日志级别
-		}))
+		}))}
 	}
 
 	return c
@@ -153,7 +163,7 @@ func (c *ImClient) buildRequest(ctx context.Context, method, urlAddr string, par
 	// 注意：Debug 级别会打印完整请求头与请求体（可能包含业务消息内容），
 	// 生产环境请勿开启 Debug 日志，或在自定义 Logger 中对 header/body 做脱敏处理。
 	// 采用惰性参数传递，仅当 Debug 级别启用时才格式化，避免热路径上的无谓开销。
-	c.log.Debug("curl",
+	c.log.Debug(ctx, "curl",
 		"method", req.Method,
 		"url", req.URL.String(),
 		"header", headers,
@@ -183,7 +193,7 @@ func (c *ImClient) sendRequestWithRetry(ctx context.Context, req *http.Request) 
 			time.Sleep(waitTime)
 			waitTime *= 2 // 指数退避
 
-			c.log.Debug("Retrying request", "attempt", attempt+1, "wait", waitTime)
+			c.log.Debug(ctx, "Retrying request", "attempt", attempt+1, "wait", waitTime)
 		}
 
 		// 重置请求体，避免重试时因 body 已被消费而发送空请求
@@ -231,7 +241,7 @@ func (c *ImClient) Curl(ctx context.Context, method, urlAddr string, param any) 
 	}
 
 	if c.DryRun {
-		c.log.Debug("dry run: skip request", "url", req.URL.String())
+		c.log.Debug(ctx, "dry run: skip request", "url", req.URL.String())
 		return nil, nil, fmt.Errorf("dry run: no real request sent to %s", req.URL.String())
 	}
 
